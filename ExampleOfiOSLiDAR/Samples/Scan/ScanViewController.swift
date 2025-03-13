@@ -222,15 +222,15 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             return
         }
         
-        print("Processing \(capturedFrames.count) frames for texture blending...")
+        print("Processing \(capturedFrames.count) frames for texture mapping...")
         
         // Get all mesh anchors from the current frame
         let anchors = currentFrame.anchors
         let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
         print("Total mesh anchors found: \(meshAnchors.count)")
         
-        // Dictionary to track frames for each node with their scores
-        var framesForNode: [SCNNode: [(frameCapture: FrameCapture, score: Float)]] = [:]
+        // Dictionary to track the frame to use for each node
+        var frameForNode: [SCNNode: FrameCapture] = [:]
         
         // Count valid nodes
         var validNodeCount = 0
@@ -244,154 +244,74 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             let meshCenter = anchor.transform.columns.3
             let meshPosition = simd_float3(meshCenter.x, meshCenter.y, meshCenter.z)
             
-            // Array to collect all frames for this node with their scores
-            var frameScores: [(frameCapture: FrameCapture, score: Float)] = []
-            
             // Track frame filtering statistics for this node
             var totalFramesProcessed = 0
-            var framesPassingVisibilityCheck = 0
-            var framesPassingAngleThreshold = 0
+            var frameFound = false
             
-            // Process each captured frame to find good views for this node
+            // Process each captured frame until we find one where the node is visible
             for frameCapture in capturedFrames {
                 totalFramesProcessed += 1
                 
                 // Get camera position from the stored transform
                 let cameraTransform = frameCapture.cameraTransform
-                let cameraPosition = simd_float3(cameraTransform.columns.3.x, 
-                                                cameraTransform.columns.3.y,
-                                                cameraTransform.columns.3.z)
                 
-                // Calculate direction vector from camera to mesh
-                let directionToMesh = simd_normalize(meshPosition - cameraPosition)
-                
-                // Calculate camera forward vector (negative z-axis of camera transform)
+                // First check: Is the node in front of the camera? (positive dot product)
                 let cameraForward = simd_normalize(simd_float3(-cameraTransform.columns.2.x,
                                                              -cameraTransform.columns.2.y,
                                                              -cameraTransform.columns.2.z))
-                
-                // Calculate the dot product (higher value means better angle)
+                let directionToMesh = simd_normalize(meshPosition - simd_float3(cameraTransform.columns.3.x, 
+                                                          cameraTransform.columns.3.y,
+                                                          cameraTransform.columns.3.z))
                 let alignmentScore = simd_dot(directionToMesh, cameraForward)
                 
-                // First check: Is the node in front of the camera? (positive dot product)
                 guard alignmentScore > 0 else { continue }
                 
                 // Second check: Is the node within the camera's field of view?
-                // Project the 3D point into the camera's view to see if it's visible
                 let isVisible = isNodeVisibleInCamera(nodePosition: meshPosition, 
                                                      cameraTransform: cameraTransform)
                 
                 // Skip this frame if the node is not visible
                 guard isVisible else { continue }
-                framesPassingVisibilityCheck += 1
                 
-                // Also consider distance (not too close, not too far)
-                let distance = simd_length(meshPosition - cameraPosition)
-                let distanceScore: Float = 1.0 / (1.0 + abs(distance - 0.5)) // 0.5m is ideal distance
-                
-                // Combined score
-                let score = alignmentScore * distanceScore
-                
-                // Only include frames that have a good view of the node
-                if alignmentScore > 0.6 { // Adjust this threshold as needed
-                    frameScores.append((frameCapture, score))
-                    framesPassingAngleThreshold += 1
-                }
+                // Found a frame where this node is visible - use it!
+                frameForNode[node] = frameCapture
+                frameFound = true
+                break  // Stop processing more frames for this node
             }
             
-            // Sort frames by score (best first)
-            frameScores.sort { $0.score > $1.score }
-            
-            // Store frames for this node (up to a reasonable number to blend)
-            let blendFrames = Array(frameScores.prefix(5)) // Use up to 5 frames for blending
-            framesForNode[node] = blendFrames
-            
             // Log statistics for this node
-            print("Node \(node.description.prefix(20))... : \(totalFramesProcessed) total frames, \(framesPassingVisibilityCheck) visible, \(framesPassingAngleThreshold) passed angle threshold, \(blendFrames.count) used for blending")
+            if frameFound {
+                print("Node \(node.description.prefix(20))... : Found frame after checking \(totalFramesProcessed) frames")
+            } else {
+                print("Node \(node.description.prefix(20))... : No suitable frame found after checking \(totalFramesProcessed) frames")
+            }
         }
         
-        print("Found \(validNodeCount) valid nodes out of \(meshAnchors.count) mesh anchors")
-        print("Node texture stats: " + framesForNode.map { "Node: \($0.key.description) - \($0.value.count) frames" }.joined(separator: ", "))
+        print("Found \(frameForNode.count) nodes with viable frames out of \(validNodeCount) valid nodes")
         
         // Count nodes that received textures
         var texturedNodeCount = 0
         
-        // Apply blended textures to each node
+        // Apply textures to each node
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
             
-            if let nodeScoredFrames = framesForNode[node], !nodeScoredFrames.isEmpty {
+            if let frameCapture = frameForNode[node] {
                 texturedNodeCount += 1
                 
-                // Create a blended image from all good frames for this node
-                let blendedImage = blendImagesForNode(frames: nodeScoredFrames)
+                // Use the image directly - no blending needed
+                let image = frameCapture.image
                 
-                // For scan geometry we need an ARFrame, so use the current frame but with our blended texture
-                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: true, cameraImage: blendedImage)
+                // Apply the texture
+                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: true, cameraImage: image)
                 node.geometry = geometry
             }
         }
         
-        print("Applied blended textures to \(texturedNodeCount) nodes out of \(validNodeCount) valid nodes")
-        print("Finished blending textures from \(capturedFrames.count) frames")
+        print("Applied textures to \(texturedNodeCount) nodes out of \(validNodeCount) valid nodes")
+        print("Finished texture mapping from \(capturedFrames.count) frames")
     }
     
-    // Helper function to blend multiple images together with weighting based on scores
-    private func blendImagesForNode(frames: [(frameCapture: FrameCapture, score: Float)]) -> UIImage {
-        // If we only have one frame, just return its image
-        if frames.count == 1 {
-            return frames[0].frameCapture.image
-        }
-        
-        // Calculate total weight for normalization
-        let totalWeight = frames.reduce(0) { $0 + $1.score }
-        
-        // Start with the first image
-        guard let firstImage = frames[0].frameCapture.image.cgImage,
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-            return frames[0].frameCapture.image // Fallback if we can't blend
-        }
-        
-        // Get dimensions from the first image (these are non-optional)
-        let width = firstImage.width
-        let height = firstImage.height
-        
-        // Create a bitmap context to draw our blended result
-        guard let context = CGContext(data: nil,
-                                     width: width,
-                                     height: height,
-                                     bitsPerComponent: 8,
-                                     bytesPerRow: 0,
-                                     space: colorSpace,
-                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            return frames[0].frameCapture.image // Fallback if we can't create context
-        }
-        
-        // Clear context
-        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        
-        // Normalize weights
-        let normalizedWeights = frames.map { $0.score / totalWeight }
-        
-        // Blend images by painting them with their weights as alpha
-        for (index, frame) in frames.enumerated() {
-            if let cgImage = frame.frameCapture.image.cgImage {
-                context.saveGState()
-                context.setAlpha(CGFloat(normalizedWeights[index]))
-                context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-                context.restoreGState()
-            }
-        }
-        
-        // Get the blended image
-        if let blendedCGImage = context.makeImage() {
-            return UIImage(cgImage: blendedCGImage)
-        }
-        
-        // Fallback to the highest scored image if blending fails
-        return frames[0].frameCapture.image
-    }
-
     // Original method no longer needed as we extract images immediately during capture
     func captureCamera() -> UIImage? {
         guard let frame = sceneView.session.currentFrame else {return nil}
