@@ -116,7 +116,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         isCapturingFrames = false
         
         // Set scan mode to stop anchor scanning
-        scanMode = .noneed
+        scanMode = .done
         
         // Change background color for better visualization
         sceneView.scene.background.contents = UIColor.black
