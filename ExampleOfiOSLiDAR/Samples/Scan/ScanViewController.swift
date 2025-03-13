@@ -56,6 +56,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     var scanButton: UIButton!
     var capturedFrames: [ARFrame] = []
     var isCapturingFrames: Bool = false
+    var lastCaptureTime: TimeInterval = 0
     
     override func viewDidLoad() {
         func setARViewOptions() {
@@ -134,10 +135,11 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         if isCapturingFrames, let currentFrame = sceneView.session.currentFrame {
-            capturedFrames.append(currentFrame)
-            
-            if capturedFrames.count % 30 == 0 {
-                print("Captured \(capturedFrames.count) frames")
+            // Capture one frame every 10 seconds
+            if time - lastCaptureTime >= 10.0 {
+                capturedFrames.append(currentFrame)
+                lastCaptureTime = time
+                print("Captured frame at time \(time). Total frames: \(capturedFrames.count)")
             }
         }
     }
