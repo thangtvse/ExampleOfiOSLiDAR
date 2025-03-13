@@ -44,6 +44,13 @@ class LabelScene: SKScene {
     }
 }
 class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
+    // Custom structure to store only essential frame data
+    struct FrameCapture {
+        let image: UIImage
+        let cameraTransform: simd_float4x4
+        let timestamp: TimeInterval
+    }
+    
     enum ScanMode {
         case noneed
         case doing
@@ -54,7 +61,8 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     var scanMode: ScanMode = .noneed
     var originalSource: Any? = nil
     var scanButton: UIButton!
-    var capturedFrames: [ARFrame] = []
+    // Replace ARFrame array with our custom structure
+    var capturedFrames: [FrameCapture] = []
     var isCapturingFrames: Bool = false
     var lastCaptureTime: TimeInterval = 0
     
@@ -147,19 +155,34 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         if isCapturingFrames, let currentFrame = sceneView.session.currentFrame {
-            // Capture one frame every 10 seconds
+            // Capture one frame every 1 second (was 10 seconds before)
             if time - lastCaptureTime >= 1 {
-                capturedFrames.append(currentFrame)
-                lastCaptureTime = time
-                print("Captured frame at time \(time). Total frames: \(capturedFrames.count)")
+                // Extract only the necessary data from the frame
+                if let image = extractImageFromFrame(currentFrame) {
+                    let frameCapture = FrameCapture(
+                        image: image,
+                        cameraTransform: currentFrame.camera.transform,
+                        timestamp: time
+                    )
+                    capturedFrames.append(frameCapture)
+                    lastCaptureTime = time
+                    print("Captured frame at time \(time). Total frames: \(capturedFrames.count)")
+                }
             }
         }
     }
     
+    // Helper function to extract UIImage from ARFrame
+    private func extractImageFromFrame(_ frame: ARFrame) -> UIImage? {
+        let pixelBuffer = frame.capturedImage
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+    
     func scanGeometory(frame: ARFrame, anchor: ARMeshAnchor, node: SCNNode, needTexture: Bool = false, cameraImage: UIImage? = nil) -> SCNGeometry {
-
         let camera = frame.camera
-
         let geometry = SCNGeometry(geometry: anchor.geometry, camera: camera, modelMatrix: anchor.transform, needTexture: needTexture)
 
         if let image = cameraImage, needTexture {
@@ -196,7 +219,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
         
         // Dictionary to track the best frame for each node based on viewing angle
-        var bestFrameForNode: [SCNNode: (frame: ARFrame, score: Float)] = [:]
+        var bestFrameForNode: [SCNNode: (frameCapture: FrameCapture, score: Float)] = [:]
         
         // Process each anchor
         for anchor in meshAnchors {
@@ -207,9 +230,9 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             let meshPosition = simd_float3(meshCenter.x, meshCenter.y, meshCenter.z)
             
             // Process each captured frame to find the best one for this node
-            for frame in capturedFrames {
-                // Get camera position from frame
-                let cameraTransform = frame.camera.transform
+            for frameCapture in capturedFrames {
+                // Get camera position from the stored transform
+                let cameraTransform = frameCapture.cameraTransform
                 let cameraPosition = simd_float3(cameraTransform.columns.3.x, 
                                                 cameraTransform.columns.3.y,
                                                 cameraTransform.columns.3.z)
@@ -234,9 +257,9 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                 
                 // Update if this is the best frame so far
                 if let currentBest = bestFrameForNode[node], currentBest.score < score {
-                    bestFrameForNode[node] = (frame, score)
+                    bestFrameForNode[node] = (frameCapture, score)
                 } else if bestFrameForNode[node] == nil {
-                    bestFrameForNode[node] = (frame, score)
+                    bestFrameForNode[node] = (frameCapture, score)
                 }
             }
         }
@@ -245,19 +268,12 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
             
-            if let bestFrameData = bestFrameForNode[node] {
-                let bestFrame = bestFrameData.frame
+            if let bestData = bestFrameForNode[node] {
+                // Use the best frame's image directly - no need to extract it again
+                let bestImage = bestData.frameCapture.image
                 
-                // Capture the image from this frame
-                let pixelBuffer = bestFrame.capturedImage
-                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                let context = CIContext(options: nil)
-                
-                guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { continue }
-                let frameImage = UIImage(cgImage: cgImage)
-                
-                // Apply the geometry with the best frame
-                let geometry = scanGeometory(frame: bestFrame, anchor: anchor, node: node, needTexture: true, cameraImage: frameImage)
+                // For scan geometry we need an ARFrame, so use the current frame but with our texture
+                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: true, cameraImage: bestImage)
                 node.geometry = geometry
             }
         }
@@ -265,16 +281,13 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         print("Finished applying textures from \(capturedFrames.count) frames")
     }
 
+    // Original method no longer needed as we extract images immediately during capture
     func captureCamera() -> UIImage? {
         guard let frame = sceneView.session.currentFrame else {return nil}
-
         let pixelBuffer = frame.capturedImage
-
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext(options:nil)
-        guard let cameraImage = context.createCGImage(image, from: image.extent) else {return nil}
-
+        guard let cameraImage = context.createCGImage(ciImage, from: ciImage.extent) else {return nil}
         return UIImage(cgImage: cameraImage)
     }
 }
