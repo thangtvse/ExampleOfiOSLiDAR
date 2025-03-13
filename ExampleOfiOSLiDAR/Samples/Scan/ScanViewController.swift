@@ -139,6 +139,11 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         let geometry = scanGeometory(frame: frame, anchor: anchor, node: node)
         node.geometry = geometry
 
+        // Log when a new node is created
+        let anchors = sceneView.session.currentFrame?.anchors ?? []
+        let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+        print("New node created. Current counts - Mesh anchors: \(meshAnchors.count)")
+        
         return node
     }
     
@@ -204,11 +209,16 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             
             let anchors = currentFrame.anchors
             let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+            print("Processing with current frame only. Mesh anchors: \(meshAnchors.count)")
+            
+            var nodeCount = 0
             for anchor in meshAnchors {
                 guard let node = sceneView.node(for: anchor) else { continue }
+                nodeCount += 1
                 let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: needTexture, cameraImage: cameraImage)
                 node.geometry = geometry
             }
+            print("Processed \(nodeCount) nodes out of \(meshAnchors.count) mesh anchors")
             return
         }
         
@@ -217,13 +227,18 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         // Get all mesh anchors from the current frame
         let anchors = currentFrame.anchors
         let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+        print("Total mesh anchors found: \(meshAnchors.count)")
         
         // Dictionary to track the best frame for each node based on viewing angle
         var bestFrameForNode: [SCNNode: (frameCapture: FrameCapture, score: Float)] = [:]
         
+        // Count valid nodes
+        var validNodeCount = 0
+        
         // Process each anchor
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
+            validNodeCount += 1
             
             // Get the center position of the mesh in world space
             let meshCenter = anchor.transform.columns.3
@@ -264,11 +279,17 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             }
         }
         
+        print("Found \(validNodeCount) valid nodes out of \(meshAnchors.count) mesh anchors")
+        
+        // Count nodes that received textures
+        var texturedNodeCount = 0
+        
         // Apply the best frame for each node
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
             
             if let bestData = bestFrameForNode[node] {
+                texturedNodeCount += 1
                 // Use the best frame's image directly - no need to extract it again
                 let bestImage = bestData.frameCapture.image
                 
@@ -278,6 +299,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             }
         }
         
+        print("Applied textures to \(texturedNodeCount) nodes out of \(validNodeCount) valid nodes")
         print("Finished applying textures from \(capturedFrames.count) frames")
     }
 
