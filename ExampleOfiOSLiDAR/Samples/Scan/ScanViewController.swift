@@ -53,6 +53,9 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     @IBOutlet weak var sceneView: ARSCNView!
     var scanMode: ScanMode = .noneed
     var originalSource: Any? = nil
+    var scanButton: UIButton!
+    var capturedFrames: [ARFrame] = []
+    var isCapturingFrames: Bool = false
     
     lazy var label = LabelScene(size:sceneView.bounds.size) { [weak self] in
         self?.rotateMode()
@@ -76,6 +79,24 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         func setControls() {
             label.setText(text: "Scan")
             sceneView.overlaySKScene = label
+            
+            // Create and configure the scan button
+            scanButton = UIButton(type: .system)
+            scanButton.setTitle("Scan Geometry", for: .normal)
+            scanButton.backgroundColor = .systemBlue
+            scanButton.setTitleColor(.white, for: .normal)
+            scanButton.layer.cornerRadius = 10
+            scanButton.translatesAutoresizingMaskIntoConstraints = false
+            scanButton.addTarget(self, action: #selector(scanButtonTapped), for: .touchUpInside)
+            
+            // Add button to view and set constraints
+            view.addSubview(scanButton)
+            NSLayoutConstraint.activate([
+                scanButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+                scanButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                scanButton.widthAnchor.constraint(equalToConstant: 200),
+                scanButton.heightAnchor.constraint(equalToConstant: 50)
+            ])
         }
         super.viewDidLoad()
         sceneView.delegate = self
@@ -86,6 +107,11 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         setControls()
     }
     
+    @objc func scanButtonTapped() {
+        sceneView.scene.background.contents = UIColor.black
+        scanAllGeometry(needTexture: true)
+    }
+    
     func rotateMode() {
         switch self.scanMode {
         case .noneed:
@@ -93,10 +119,13 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             label.setText(text: "Reset")
             originalSource = sceneView.scene.background.contents
             sceneView.scene.background.contents = UIColor.black
+            isCapturingFrames = true
+            capturedFrames.removeAll()
         case .doing:
-            break
+            self.scanMode = .done
+            label.setText(text: "Done")
+            isCapturingFrames = false
         case .done:
-            scanAllGeometry(needTexture: false)
             self.scanMode = .noneed
             label.setText(text: "Scan")
             sceneView.scene.background.contents = originalSource
@@ -129,8 +158,16 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         if (self.scanMode == .doing) {
-            self.scanAllGeometry(needTexture: true)
             self.scanMode = .done
+            label.setText(text: "Done")
+        }
+        
+        if isCapturingFrames, let currentFrame = sceneView.session.currentFrame {
+            capturedFrames.append(currentFrame)
+            
+            if capturedFrames.count % 30 == 0 {
+                print("Captured \(capturedFrames.count) frames")
+            }
         }
     }
     
@@ -151,16 +188,96 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     }
     
     func scanAllGeometry(needTexture: Bool) {
-        guard let frame = sceneView.session.currentFrame else { return }
-        guard let cameraImage = captureCamera() else {return}
-
-        guard let anchors = sceneView.session.currentFrame?.anchors else { return }
-        let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor}
+        guard let currentFrame = sceneView.session.currentFrame else { return }
+        
+        // If we don't need textures or don't have captured frames, use the current frame
+        if !needTexture || capturedFrames.isEmpty {
+            guard let cameraImage = captureCamera() else { return }
+            
+            let anchors = currentFrame.anchors
+            let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+            for anchor in meshAnchors {
+                guard let node = sceneView.node(for: anchor) else { continue }
+                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: needTexture, cameraImage: cameraImage)
+                node.geometry = geometry
+            }
+            return
+        }
+        
+        print("Processing \(capturedFrames.count) frames for optimal texturing...")
+        
+        // Get all mesh anchors from the current frame
+        let anchors = currentFrame.anchors
+        let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+        
+        // Dictionary to track the best frame for each node based on viewing angle
+        var bestFrameForNode: [SCNNode: (frame: ARFrame, score: Float)] = [:]
+        
+        // Process each anchor
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
-            let geometry = scanGeometory(frame: frame, anchor: anchor, node: node, needTexture: needTexture, cameraImage: cameraImage)
-            node.geometry = geometry
+            
+            // Get the center position of the mesh in world space
+            let meshCenter = anchor.transform.columns.3
+            let meshPosition = simd_float3(meshCenter.x, meshCenter.y, meshCenter.z)
+            
+            // Process each captured frame to find the best one for this node
+            for frame in capturedFrames {
+                // Get camera position from frame
+                let cameraTransform = frame.camera.transform
+                let cameraPosition = simd_float3(cameraTransform.columns.3.x, 
+                                                cameraTransform.columns.3.y,
+                                                cameraTransform.columns.3.z)
+                
+                // Calculate direction vector from camera to mesh
+                let directionToMesh = simd_normalize(meshPosition - cameraPosition)
+                
+                // Calculate camera forward vector (negative z-axis of camera transform)
+                let cameraForward = simd_normalize(simd_float3(-cameraTransform.columns.2.x,
+                                                             -cameraTransform.columns.2.y,
+                                                             -cameraTransform.columns.2.z))
+                
+                // Calculate the dot product (higher value means better angle)
+                let alignmentScore = simd_dot(directionToMesh, cameraForward)
+                
+                // Also consider distance (not too close, not too far)
+                let distance = simd_length(meshPosition - cameraPosition)
+                let distanceScore: Float = 1.0 / (1.0 + abs(distance - 0.5)) // 0.5m is ideal distance
+                
+                // Combined score
+                let score = alignmentScore * distanceScore
+                
+                // Update if this is the best frame so far
+                if let currentBest = bestFrameForNode[node], currentBest.score < score {
+                    bestFrameForNode[node] = (frame, score)
+                } else if bestFrameForNode[node] == nil {
+                    bestFrameForNode[node] = (frame, score)
+                }
+            }
         }
+        
+        // Apply the best frame for each node
+        for anchor in meshAnchors {
+            guard let node = sceneView.node(for: anchor) else { continue }
+            
+            if let bestFrameData = bestFrameForNode[node] {
+                let bestFrame = bestFrameData.frame
+                
+                // Capture the image from this frame
+                let pixelBuffer = bestFrame.capturedImage
+                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                let context = CIContext(options: nil)
+                
+                guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { continue }
+                let frameImage = UIImage(cgImage: cgImage)
+                
+                // Apply the geometry with the best frame
+                let geometry = scanGeometory(frame: bestFrame, anchor: anchor, node: node, needTexture: true, cameraImage: frameImage)
+                node.geometry = geometry
+            }
+        }
+        
+        print("Finished applying textures from \(capturedFrames.count) frames")
     }
 
     func captureCamera() -> UIImage? {
