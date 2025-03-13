@@ -104,16 +104,27 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     }
     
     @objc func scanButtonTapped() {
-        sceneView.scene.background.contents = UIColor.black
+        // Stop capturing frames
         isCapturingFrames = false
+        
+        // Set scan mode to stop anchor scanning
+        scanMode = .noneed
+        
+        // Change background color for better visualization
+        sceneView.scene.background.contents = UIColor.black
+        
+        print("Starting geometry scan with \(capturedFrames.count) captured frames. No new anchors will be processed.")
+        
+        // Process all existing anchors with the captured frames
         scanAllGeometry(needTexture: true)
     }
     
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+        // Only process new anchors if we're in normal mode (not scanning or done)
         guard scanMode == .noneed else {
             return nil
         }
-        guard let anchor = anchor as? ARMeshAnchor ,
+        guard let anchor = anchor as? ARMeshAnchor,
               let frame = sceneView.session.currentFrame else { return nil }
 
         let node = SCNNode()
@@ -124,6 +135,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     }
     
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        // Only update existing nodes if we're in normal mode (not scanning or done)
         guard scanMode == .noneed else {
             return
         }
