@@ -222,15 +222,15 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             return
         }
         
-        print("Processing \(capturedFrames.count) frames for optimal texturing...")
+        print("Processing \(capturedFrames.count) frames for texture blending...")
         
         // Get all mesh anchors from the current frame
         let anchors = currentFrame.anchors
         let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
         print("Total mesh anchors found: \(meshAnchors.count)")
         
-        // Dictionary to track the best frame for each node based on viewing angle
-        var bestFrameForNode: [SCNNode: (frameCapture: FrameCapture, score: Float)] = [:]
+        // Dictionary to track frames for each node with their scores
+        var framesForNode: [SCNNode: [(frameCapture: FrameCapture, score: Float)]] = [:]
         
         // Count valid nodes
         var validNodeCount = 0
@@ -244,7 +244,10 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             let meshCenter = anchor.transform.columns.3
             let meshPosition = simd_float3(meshCenter.x, meshCenter.y, meshCenter.z)
             
-            // Process each captured frame to find the best one for this node
+            // Array to collect all frames for this node with their scores
+            var frameScores: [(frameCapture: FrameCapture, score: Float)] = []
+            
+            // Process each captured frame to find good views for this node
             for frameCapture in capturedFrames {
                 // Get camera position from the stored transform
                 let cameraTransform = frameCapture.cameraTransform
@@ -270,37 +273,100 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                 // Combined score
                 let score = alignmentScore * distanceScore
                 
-                // Update if this is the best frame so far
-                if let currentBest = bestFrameForNode[node], currentBest.score < score {
-                    bestFrameForNode[node] = (frameCapture, score)
-                } else if bestFrameForNode[node] == nil {
-                    bestFrameForNode[node] = (frameCapture, score)
+                // Only include frames that have a reasonable view of the node
+                // (where the object is somewhat in front of the camera)
+                if alignmentScore > 0.6 { // Adjust this threshold as needed
+                    frameScores.append((frameCapture, score))
                 }
             }
+            
+            // Sort frames by score (best first)
+            frameScores.sort { $0.score > $1.score }
+            
+            // Store frames for this node (up to a reasonable number to blend)
+            framesForNode[node] = Array(frameScores.prefix(5)) // Use up to 5 frames for blending
         }
         
         print("Found \(validNodeCount) valid nodes out of \(meshAnchors.count) mesh anchors")
+        print("Node texture stats: " + framesForNode.map { "Node: \($0.key.description) - \($0.value.count) frames" }.joined(separator: ", "))
         
         // Count nodes that received textures
         var texturedNodeCount = 0
         
-        // Apply the best frame for each node
+        // Apply blended textures to each node
         for anchor in meshAnchors {
             guard let node = sceneView.node(for: anchor) else { continue }
             
-            if let bestData = bestFrameForNode[node] {
+            if let nodeScoredFrames = framesForNode[node], !nodeScoredFrames.isEmpty {
                 texturedNodeCount += 1
-                // Use the best frame's image directly - no need to extract it again
-                let bestImage = bestData.frameCapture.image
                 
-                // For scan geometry we need an ARFrame, so use the current frame but with our texture
-                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: true, cameraImage: bestImage)
+                // Create a blended image from all good frames for this node
+                let blendedImage = blendImagesForNode(frames: nodeScoredFrames)
+                
+                // For scan geometry we need an ARFrame, so use the current frame but with our blended texture
+                let geometry = scanGeometory(frame: currentFrame, anchor: anchor, node: node, needTexture: true, cameraImage: blendedImage)
                 node.geometry = geometry
             }
         }
         
-        print("Applied textures to \(texturedNodeCount) nodes out of \(validNodeCount) valid nodes")
-        print("Finished applying textures from \(capturedFrames.count) frames")
+        print("Applied blended textures to \(texturedNodeCount) nodes out of \(validNodeCount) valid nodes")
+        print("Finished blending textures from \(capturedFrames.count) frames")
+    }
+    
+    // Helper function to blend multiple images together with weighting based on scores
+    private func blendImagesForNode(frames: [(frameCapture: FrameCapture, score: Float)]) -> UIImage {
+        // If we only have one frame, just return its image
+        if frames.count == 1 {
+            return frames[0].frameCapture.image
+        }
+        
+        // Calculate total weight for normalization
+        let totalWeight = frames.reduce(0) { $0 + $1.score }
+        
+        // Start with the first image
+        guard let firstImage = frames[0].frameCapture.image.cgImage,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return frames[0].frameCapture.image // Fallback if we can't blend
+        }
+        
+        // Get dimensions from the first image (these are non-optional)
+        let width = firstImage.width
+        let height = firstImage.height
+        
+        // Create a bitmap context to draw our blended result
+        guard let context = CGContext(data: nil,
+                                     width: width,
+                                     height: height,
+                                     bitsPerComponent: 8,
+                                     bytesPerRow: 0,
+                                     space: colorSpace,
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return frames[0].frameCapture.image // Fallback if we can't create context
+        }
+        
+        // Clear context
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        
+        // Normalize weights
+        let normalizedWeights = frames.map { $0.score / totalWeight }
+        
+        // Blend images by painting them with their weights as alpha
+        for (index, frame) in frames.enumerated() {
+            if let cgImage = frame.frameCapture.image.cgImage {
+                context.saveGState()
+                context.setAlpha(CGFloat(normalizedWeights[index]))
+                context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+                context.restoreGState()
+            }
+        }
+        
+        // Get the blended image
+        if let blendedCGImage = context.makeImage() {
+            return UIImage(cgImage: blendedCGImage)
+        }
+        
+        // Fallback to the highest scored image if blending fails
+        return frames[0].frameCapture.image
     }
 
     // Original method no longer needed as we extract images immediately during capture
