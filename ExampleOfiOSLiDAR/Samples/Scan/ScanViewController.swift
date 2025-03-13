@@ -247,8 +247,15 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             // Array to collect all frames for this node with their scores
             var frameScores: [(frameCapture: FrameCapture, score: Float)] = []
             
+            // Track frame filtering statistics for this node
+            var totalFramesProcessed = 0
+            var framesPassingVisibilityCheck = 0
+            var framesPassingAngleThreshold = 0
+            
             // Process each captured frame to find good views for this node
             for frameCapture in capturedFrames {
+                totalFramesProcessed += 1
+                
                 // Get camera position from the stored transform
                 let cameraTransform = frameCapture.cameraTransform
                 let cameraPosition = simd_float3(cameraTransform.columns.3.x, 
@@ -266,6 +273,18 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                 // Calculate the dot product (higher value means better angle)
                 let alignmentScore = simd_dot(directionToMesh, cameraForward)
                 
+                // First check: Is the node in front of the camera? (positive dot product)
+                guard alignmentScore > 0 else { continue }
+                
+                // Second check: Is the node within the camera's field of view?
+                // Project the 3D point into the camera's view to see if it's visible
+                let isVisible = isNodeVisibleInCamera(nodePosition: meshPosition, 
+                                                     cameraTransform: cameraTransform)
+                
+                // Skip this frame if the node is not visible
+                guard isVisible else { continue }
+                framesPassingVisibilityCheck += 1
+                
                 // Also consider distance (not too close, not too far)
                 let distance = simd_length(meshPosition - cameraPosition)
                 let distanceScore: Float = 1.0 / (1.0 + abs(distance - 0.5)) // 0.5m is ideal distance
@@ -273,10 +292,10 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                 // Combined score
                 let score = alignmentScore * distanceScore
                 
-                // Only include frames that have a reasonable view of the node
-                // (where the object is somewhat in front of the camera)
+                // Only include frames that have a good view of the node
                 if alignmentScore > 0.6 { // Adjust this threshold as needed
                     frameScores.append((frameCapture, score))
+                    framesPassingAngleThreshold += 1
                 }
             }
             
@@ -284,7 +303,11 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             frameScores.sort { $0.score > $1.score }
             
             // Store frames for this node (up to a reasonable number to blend)
-            framesForNode[node] = Array(frameScores.prefix(5)) // Use up to 5 frames for blending
+            let blendFrames = Array(frameScores.prefix(5)) // Use up to 5 frames for blending
+            framesForNode[node] = blendFrames
+            
+            // Log statistics for this node
+            print("Node \(node.description.prefix(20))... : \(totalFramesProcessed) total frames, \(framesPassingVisibilityCheck) visible, \(framesPassingAngleThreshold) passed angle threshold, \(blendFrames.count) used for blending")
         }
         
         print("Found \(validNodeCount) valid nodes out of \(meshAnchors.count) mesh anchors")
@@ -377,5 +400,34 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         let context = CIContext(options:nil)
         guard let cameraImage = context.createCGImage(ciImage, from: ciImage.extent) else {return nil}
         return UIImage(cgImage: cameraImage)
+    }
+
+    // Helper function to determine if a node is visible in the camera's field of view
+    private func isNodeVisibleInCamera(nodePosition: simd_float3, cameraTransform: simd_float4x4) -> Bool {
+        // Create the view matrix (inverse of the camera transform)
+        let viewMatrix = cameraTransform.inverse
+        
+        // Transform the node position into camera space
+        var nodePositionVec = simd_float4(nodePosition.x, nodePosition.y, nodePosition.z, 1.0)
+        nodePositionVec = viewMatrix * nodePositionVec
+        
+        // If node is behind the camera (negative z), it's not visible
+        if nodePositionVec.z <= 0 {
+            return false
+        }
+        
+        // Approximate projection to check if within field of view
+        // This uses a simplified perspective projection
+        let aspectRatio: Float = 1.0  // Assuming square for simplicity, adjust if needed
+        let fovY: Float = 60.0 * .pi / 180.0  // 60 degrees field of view, adjust if needed
+        
+        // Calculate normalized device coordinates (between -1 and 1)
+        let tanHalfFov = tan(fovY / 2.0)
+        let ndcX = nodePositionVec.x / (nodePositionVec.z * tanHalfFov * aspectRatio)
+        let ndcY = nodePositionVec.y / (nodePositionVec.z * tanHalfFov)
+        
+        // Check if the point is within the normalized viewport (-1 to 1)
+        // Adding some margin (0.9 instead of 1.0) to ensure good visibility
+        return abs(ndcX) < 0.9 && abs(ndcY) < 0.9
     }
 }
