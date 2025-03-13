@@ -148,7 +148,7 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         if isCapturingFrames, let currentFrame = sceneView.session.currentFrame {
             // Capture one frame every 10 seconds
-            if time - lastCaptureTime >= 10.0 {
+            if time - lastCaptureTime >= 1 {
                 capturedFrames.append(currentFrame)
                 lastCaptureTime = time
                 print("Captured frame at time \(time). Total frames: \(capturedFrames.count)")
