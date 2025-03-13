@@ -247,6 +247,8 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             // Track frame filtering statistics for this node
             var totalFramesProcessed = 0
             var frameFound = false
+            var visibleCount = 0
+            var frontCount = 0
             
             // Process each captured frame until we find one where the node is visible
             for frameCapture in capturedFrames {
@@ -264,14 +266,22 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                                                           cameraTransform.columns.3.z))
                 let alignmentScore = simd_dot(directionToMesh, cameraForward)
                 
-                guard alignmentScore > 0 else { continue }
+                if alignmentScore > 0 {
+                    frontCount += 1
+                } else {
+                    continue
+                }
                 
                 // Second check: Is the node within the camera's field of view?
                 let isVisible = isNodeVisibleInCamera(nodePosition: meshPosition, 
                                                      cameraTransform: cameraTransform)
                 
                 // Skip this frame if the node is not visible
-                guard isVisible else { continue }
+                if isVisible {
+                    visibleCount += 1
+                } else {
+                    continue
+                }
                 
                 // Found a frame where this node is visible - use it!
                 frameForNode[node] = frameCapture
@@ -279,11 +289,11 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
                 break  // Stop processing more frames for this node
             }
             
-            // Log statistics for this node
+            // Log detailed statistics for this node
             if frameFound {
-                print("Node \(node.description.prefix(20))... : Found frame after checking \(totalFramesProcessed) frames")
+                print("Node \(node.description.prefix(20))... : Found frame after checking \(totalFramesProcessed) frames. Front: \(frontCount), Visible: \(visibleCount)")
             } else {
-                print("Node \(node.description.prefix(20))... : No suitable frame found after checking \(totalFramesProcessed) frames")
+                print("Node \(node.description.prefix(20))... : No suitable frame found after checking \(totalFramesProcessed) frames. Front: \(frontCount), Visible: \(visibleCount)")
             }
         }
         
@@ -336,18 +346,21 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             return false
         }
         
-        // Approximate projection to check if within field of view
-        // This uses a simplified perspective projection
-        let aspectRatio: Float = 1.0  // Assuming square for simplicity, adjust if needed
-        let fovY: Float = 60.0 * .pi / 180.0  // 60 degrees field of view, adjust if needed
+        // Use wider field of view and aspect ratio to be more permissive
+        // iPhone cameras typically have FOV around 60-70 degrees, but we'll use a wider value
+        let aspectRatio: Float = 4.0/3.0  // Common aspect ratio for iPhone cameras
+        let fovY: Float = 80.0 * .pi / 180.0  // Using a wider FOV (80 degrees) to be more permissive
         
         // Calculate normalized device coordinates (between -1 and 1)
         let tanHalfFov = tan(fovY / 2.0)
         let ndcX = nodePositionVec.x / (nodePositionVec.z * tanHalfFov * aspectRatio)
         let ndcY = nodePositionVec.y / (nodePositionVec.z * tanHalfFov)
         
-        // Check if the point is within the normalized viewport (-1 to 1)
-        // Adding some margin (0.9 instead of 1.0) to ensure good visibility
-        return abs(ndcX) < 0.9 && abs(ndcY) < 0.9
+        // Use a more permissive margin (1.5 instead of 0.9) to catch more potential matches
+        // This means nodes slightly outside the typical view frustum will still be considered visible
+        let margin: Float = 1.5
+        let isInView = abs(ndcX) < margin && abs(ndcY) < margin
+        
+        return isInView
     }
 }
