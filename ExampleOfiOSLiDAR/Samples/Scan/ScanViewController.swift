@@ -57,10 +57,6 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     var capturedFrames: [ARFrame] = []
     var isCapturingFrames: Bool = false
     
-    lazy var label = LabelScene(size:sceneView.bounds.size) { [weak self] in
-        self?.rotateMode()
-    }
-
     override func viewDidLoad() {
         func setARViewOptions() {
             sceneView.scene = SCNScene()
@@ -77,9 +73,6 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
             return configuration
         }
         func setControls() {
-            label.setText(text: "Scan")
-            sceneView.overlaySKScene = label
-            
             // Create and configure the scan button
             scanButton = UIButton(type: .system)
             scanButton.setTitle("Scan Geometry", for: .normal)
@@ -105,31 +98,14 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
         let configuration = buildConfigure()
         sceneView.session.run(configuration)
         setControls()
+        isCapturingFrames = true
+        capturedFrames.removeAll()
     }
     
     @objc func scanButtonTapped() {
         sceneView.scene.background.contents = UIColor.black
+        isCapturingFrames = false
         scanAllGeometry(needTexture: true)
-    }
-    
-    func rotateMode() {
-        switch self.scanMode {
-        case .noneed:
-            self.scanMode = .doing
-            label.setText(text: "Reset")
-            originalSource = sceneView.scene.background.contents
-            sceneView.scene.background.contents = UIColor.black
-            isCapturingFrames = true
-            capturedFrames.removeAll()
-        case .doing:
-            self.scanMode = .done
-            label.setText(text: "Done")
-            isCapturingFrames = false
-        case .done:
-            self.scanMode = .noneed
-            label.setText(text: "Scan")
-            sceneView.scene.background.contents = originalSource
-        }
     }
     
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
@@ -157,11 +133,6 @@ class ScanViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        if (self.scanMode == .doing) {
-            self.scanMode = .done
-            label.setText(text: "Done")
-        }
-        
         if isCapturingFrames, let currentFrame = sceneView.session.currentFrame {
             capturedFrames.append(currentFrame)
             
