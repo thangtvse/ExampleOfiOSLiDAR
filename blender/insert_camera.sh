@@ -1,0 +1,1 @@
+/Applications/Blender.app/Contents/MacOS/blender ./project.blend -P script.py 
